@@ -1,74 +1,52 @@
-#include <stm32f4xx_hal.h>
-#include <stdio.h>
-#include <math.h>
+#include "stm32f4xx.h"
 #include "mpu6050.h"
-#include "complementary_filter.h"
-#include "uart.h"
+#include "servo.h"   // LỖI 1: Phải có dòng này để máy hiểu các hàm Servo
+#include <math.h>
 
-volatile uint8_t imu_filter_flag = 0;
-volatile uint8_t mpu_status = 0;
-
-void TIM2_IRQHandler(void) {
-	if (TIM2->SR & (1U << 0)) {
-		imu_filter_flag = 1;         // Set our synchronization flag
-		TIM2->SR &= ~(1U << 0);     // Clear the interrupt pending bit
-	}
-}
-
-void TIM2_config(void) {
-	RCC->APB1ENR |= (1U << 0);
-	TIM2->CR1 |= (1U << 0);
-	TIM2->PSC = 16 - 1;
-	TIM2->ARR = 10000 - 1; // Count to 10ms
-	TIM2->DIER |= (1U << 0);
-	NVIC_EnableIRQ(TIM2_IRQn);
-}
+// Khai báo lại các biến chứa dữ liệu thô
+int16_t Accel_X, Accel_Y, Accel_Z;
+float Roll, Pitch;
 
 int main(void) {
-	RCC->AHB1ENR |= (1U << 0);
-	GPIOA->MODER &= ~(3U << 10);
-	GPIOA->MODER |= (1U << 10);
+    // 1. Khởi tạo các ngoại vi
+    I2C1_config();
+    MPU6050_Init();
+    Servo_F401_Init();
 
-	I2C1_config();
-	USART2_Init();
+    // Kiểm tra kết nối MPU6050
+    if (!MPU6050_Test_Connection()) {
+        while(1);
+    }
 
-	setvbuf(stdout, NULL, _IONBF, 0);
-	mpu_status = MPU6050_Test_Connection();
+    uint8_t buffer[6];
 
-	if (mpu_status == 1) {
-		// Connection successful! Initialize the sensor.
-		MPU6050_Init();
-		GPIOA->BSRR = (1U << 21);
-		printf("MPU6050 Initialized Successfully!\n");
-	} else {
-		printf("ERROR: MPU6050 Not Found.\n");
-		while(1) {
-			GPIOA->BSRR = (1U << 5);
-			for (volatile int i = 0; i < 1000000; i++);
-			GPIOA->BSRR = (1U << 21);
-			for (volatile int i = 0; i < 1000000; i++);
-		}
-	}
+    while (1) {
+    	I2C1_read_multi_byte(0x68, 0x3B, buffer, 6);
+        // 3. Chuyển đổi dữ liệu thô
+        Accel_X = (int16_t)(buffer[0] << 8 | buffer[1]);
+        Accel_Y = (int16_t)(buffer[2] << 8 | buffer[3]);
+        Accel_Z = (int16_t)(buffer[4] << 8 | buffer[5]);
 
-	TIM2_config();
-	uint8_t buffer[14];
+        // 4. Tính toán góc nghiêng (Đơn vị: Độ)
+        Roll  = atan2((float)Accel_Y, (float)Accel_Z) * 57.295f;
+        Pitch = atan2(-(float)Accel_X, (float)Accel_Z) * 57.295f;
 
-	while(1) {
-		if (imu_filter_flag == 1) {
-			imu_filter_flag = 0;
+        // 5. Chuyển đổi (Map) và ĐẶT TÊN BIẾN ĐỒNG NHẤT
+        int s1_pos = (int)(Roll + 90);
+        int s2_pos = (int)(90 - Pitch);
 
-			// Get robot current tilt angle (rad)
-			float curr_angle = get_filtered_angle(MPU_ADDR, DATA_REG_ADDR, buffer, 14);
-			int16_t accel_x = (buffer[0] << 8) | buffer[1];
-			int16_t accel_z = (buffer[4] << 8) | buffer[5];
-			float raw_angle = atan2((float)accel_x, (float)accel_z);
+        // 6. THIẾT LẬP GIỚI HẠN AN TOÀN (LỖI 2: Đã sửa tên biến khớp với trên)
+        if (s1_pos < 0)   s1_pos = 0;
+        if (s1_pos > 180) s1_pos = 180;
 
-			printf("%.4f,%.4f\r\n", raw_angle, curr_angle);
-			// PID logic for motors command here
-		}
+        if (s2_pos < 0)   s2_pos = 0;
+        if (s2_pos > 180) s2_pos = 180;
 
-		// Other tasks here
-	}
+        // 7. Điều khiển Servo
+        Set_Servo1(s1_pos);
+        Set_Servo2(s2_pos);
 
-	return 0;
+        // Delay nhỏ để hệ thống ổn định
+        delay_simple(100000);
+    }
 }
