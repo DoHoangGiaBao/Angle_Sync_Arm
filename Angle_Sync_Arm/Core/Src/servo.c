@@ -15,13 +15,13 @@ void Servo_F401_Init(void) {
     GPIOA->AFR[0] |=  ((1U << (0 * 4)) | (1U << (1 * 4)));
 
     // 4. Cấu hình Timer 2 tạo xung 50Hz (Chu kỳ 20ms)
-    // Clock hệ thống là 16MHz -> PSC = 15 để đếm 1MHz (1us)
+    // Giả sử Clock hệ thống là 16MHz -> PSC = 15 để đếm 1MHz (1us)
     TIM2->PSC = 16 - 1;
     TIM2->ARR = 20000 - 1;
 
     // 5. Cấu hình Channel 1 và 2 ở chế độ PWM Mode 1
     TIM2->CCMR1 &= ~(TIM_CCMR1_OC1M | TIM_CCMR1_OC2M);
-    TIM2->CCMR1 |= (6U << 4) | (6U << 12); 
+    TIM2->CCMR1 |= (6U << 4) | (6U << 12);
     TIM2->CCMR1 |= TIM_CCMR1_OC1PE | TIM_CCMR1_OC2PE;
 
     // 6. Cho phép xuất xung ra chân (Output Enable)
