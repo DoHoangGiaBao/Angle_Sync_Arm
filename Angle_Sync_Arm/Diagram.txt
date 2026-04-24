@@ -1,0 +1,14 @@
+Servo 1:
+    VCC - Adapter 5V 2A
+    GND - GND Adapter + GND STM32
+    Signal - A0
+Servo 2:
+    VCC - Adapter 5V 2A
+    GND - GND Adapter + GND STM32
+    Signal - A1
+IMU:
+    VCC - 3V3
+    GND - GND STM32
+    SCL - SCL/D15
+    SDA - SDA/D14
+
