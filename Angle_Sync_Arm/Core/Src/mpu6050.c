@@ -1,144 +1,271 @@
 #include "mpu6050.h"
 
-void I2C1_config(void) {
-	// Enable Port B Clock
-	RCC->AHB1ENR |= (1U << 1);
+/* Global variables */
 
-	// Set PB8 (SLC) and PB9 (SDA) to Alternate Function Mode
-	GPIOB->MODER &= ~((3U << 16) | (3U << 18));
-	GPIOB->MODER |= (2U << 16) | (2U << 18);
+uint8_t          dma_rx_buffer[DMA_BUFFER_SIZE];
+int16_t          Accel_X_Raw, Accel_Y_Raw, Accel_Z_Raw;
+int16_t          Gyro_X_Raw,  Gyro_Y_Raw,  Gyro_Z_Raw;
+volatile uint8_t dma_transfer_complete = 0;
 
-	// Set PB8 and PB9 to Open-Drain
-	GPIOB->OTYPER &= ~((1U << 8) | (1U << 9));
-	GPIOB->OTYPER |= (1U << 8) | (1U << 9);
+/* Static helper: write one byte to an MPU6050 register (polling) */
+static void MPU6050_Write_Register(uint8_t reg, uint8_t data)
+{
+    /* Wait until bus is free */
+    while (I2C1->SR2 & I2C_SR2_BUSY);
 
-	// Set PB8 and PB9 to High Speed
-	GPIOB->OSPEEDR |= (2U << 16) | (2U << 18);
+    /* START */
+    I2C1->CR1 |= I2C_CR1_START;
+    while (!(I2C1->SR1 & I2C_SR1_SB));
 
-	// Unable internal Pull-up resistors for PB8 and PB9
-	GPIOB->PUPDR &= ~((3U << 16) | (3U << 18));
-	GPIOB->PUPDR |= (1U << 16) | (1U << 18);
+    /* Slave address + WRITE (LSB = 0) */
+    I2C1->DR = MPU6050_ADDR;
+    while (!(I2C1->SR1 & I2C_SR1_ADDR));
+    (void)I2C1->SR1;   /* Clear ADDR flag: read SR1 ... */
+    (void)I2C1->SR2;   /*                  ... then SR2  */
 
-	// Connect PB8 and PB9 to Alternate Function 4 (AF4 is I2C1 for these pins)
-	GPIOB->AFR[1] &= ~((15U << 0) | (15U << 4));
-	GPIOB->AFR[1] |= (4U << 0) | (4U << 4);
+    /* Register address */
+    I2C1->DR = reg;
+    while (!(I2C1->SR1 & I2C_SR1_TXE));
 
-	// Enable I2C1 clock
-	RCC->APB1ENR |= (1U << 21);
+    /* Data byte */
+    I2C1->DR = data;
+    while (!(I2C1->SR1 & I2C_SR1_BTF)); /* Both DR and shift-reg empty */
 
-	// Software reset I2C1
-	I2C1->CR1 |= (1U << 15);
-	I2C1->CR1 &= ~(1U << 15);
-
-	// Inform IC21 of APB1 6 frequency (ABP1 current clock speed is 16MHz)
-	I2C1->CR2 |= (16U << 0);
-
-	// Set Clock Control Register for Standard Mode (100kHz)
-	// Formula: CCR = (T_{r(SCL)} + T_{w(SCLH)}) * F_{PCLKx} (T_{r(SCL)}, T_{w(SCLH)} can be found in datasheet)
-	I2C1->CCR = (1 + 4) * 16;
-
-	// Set Maximum Rise Time
-	// Formula: TRISE = T_{r(SCL)} * F_{PCLKx} + 1
-	I2C1->TRISE = 1 * 16 + 1;
-
-	// Enable IC21 Peripheral
-	I2C1->CR1 |= (1U << 0);
+    /* STOP */
+    I2C1->CR1 |= I2C_CR1_STOP;
 }
 
-void I2C1_start(void) {
-	// Generate START
-	I2C1->CR1 |= (1U << 8);
+/* I2C1 peripheral init
+ *
+ * Pins   : PB8 = SCL, PB9 = SDA  (AF4, open-drain, pull-up)
+ * APB1   : 16 MHz (HSI default clock)
+ * Mode   : standard, 100 kHz
+ */
+static void I2C1_Init(void)
+{
+    /* Clocks */
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOBEN;
+    RCC->APB1ENR |= RCC_APB1ENR_I2C1EN;
 
-	// Wait for SB bit to set
-	while(!(I2C1->SR1 & (1U << 0)));
+    /* GPIO */
+
+    /* PB8, PB9 → Alternate Function mode (MODER = 10) */
+    GPIOB->MODER &= ~((3UL << 16) | (3UL << 18));  /* Clear bits */
+    GPIOB->MODER |=  ((2UL << 16) | (2UL << 18));  /* Set AF mode */
+
+    /* Open-drain output type */
+    GPIOB->OTYPER |= (1UL << 8) | (1UL << 9);
+
+    /* High speed */
+    GPIOB->OSPEEDR |= (3UL << 16) | (3UL << 18);
+
+    /* Internal pull-up (external pull-ups on the board also fine) */
+    GPIOB->PUPDR &= ~((3UL << 16) | (3UL << 18));
+    GPIOB->PUPDR |=  ((1UL << 16) | (1UL << 18));  /* 01 = pull-up */
+
+    /* AF4 (I2C1) for PB8 (AFRH bits [3:0]) and PB9 (AFRH bits [7:4]) */
+    GPIOB->AFR[1] &= ~(0xFFUL);
+    GPIOB->AFR[1] |=  (4UL << 0) | (4UL << 4);
+
+    /* I2C1 */
+
+    /* Software reset clears any stuck state */
+    I2C1->CR1 |= I2C_CR1_SWRST;
+    I2C1->CR1 &= ~I2C_CR1_SWRST;
+
+    /* Peripheral clock in MHz (must match APB1) */
+    I2C1->CR2 = 16;
+
+    /* Standard-mode 100 kHz:
+     *   CCR = PCLK1 / (2 * f_SCL) = 16 000 000 / 200 000 = 80 */
+    I2C1->CCR = 80;
+
+    /* Max rise time for standard mode = 1000 ns:
+     *   TRISE = floor(1000 ns / 62.5 ns) + 1 = 17 */
+    I2C1->TRISE = 17;
+
+    /* Enable peripheral */
+    I2C1->CR1 |= I2C_CR1_PE;
 }
 
-void I2C1_stop(void) {
-	// Stop I2C1
-	I2C1->CR1 |= (1U << 9);
+/* DMA1 Stream 0 init  →  I2C1_RX  (Channel 1)
+ *
+ * Only the receive direction is DMA-driven.
+ * The short transmit phase (register pointer) stays polling.
+ */
+static void DMA1_Stream0_Init(void)
+{
+    RCC->AHB1ENR |= RCC_AHB1ENR_DMA1EN;
+
+    /* Disable stream; wait for hardware to confirm */
+    DMA1_Stream0->CR &= ~DMA_SxCR_EN;
+    while (DMA1_Stream0->CR & DMA_SxCR_EN);
+
+    /* Clear all interrupt flags for Stream 0
+     * LIFCR bits for Stream 0: TCIF0[5] HTIF0[4] TEIF0[3] DMEIF0[2] FEIF0[0]
+     * = 0b00111101 = 0x3D  (bit 1 is reserved) */
+    DMA1->LIFCR = 0x3DUL;
+
+    /* Configure stream:
+     *   Channel 1        → I2C1_RX
+     *   Direction        → Peripheral to Memory (DIR = 00, default)
+     *   Memory increment → enabled
+     *   Data size        → byte / byte (PSIZE=00, MSIZE=00, default)
+     *   TC interrupt     → enabled
+     */
+    DMA1_Stream0->CR = (1UL << DMA_SxCR_CHSEL_Pos) |   /* Channel 1  */
+                        DMA_SxCR_MINC              |   /* Mem incr   */
+                        DMA_SxCR_TCIE;                 /* TC irq     */
+
+    /* Peripheral source: I2C1 data register */
+    DMA1_Stream0->PAR  = (uint32_t)&I2C1->DR;
+
+    /* Memory destination: our receive buffer */
+    DMA1_Stream0->M0AR = (uint32_t)dma_rx_buffer;
+
+    /* Transfer count (reset before each read in MPU6050_Read_All_DMA) */
+    DMA1_Stream0->NDTR = DMA_BUFFER_SIZE;
+
+    /* Enable DMA1 Stream 0 interrupt in NVIC */
+    NVIC_SetPriority(DMA1_Stream0_IRQn, 1);
+    NVIC_EnableIRQ(DMA1_Stream0_IRQn);
 }
 
-void I2C1_write(uint8_t data) {
-	// Wait for TXE bit to set
-	while(!(I2C1->SR1 & (1U << 7)));
+/* Public: initialise hardware and wake up MPU6050 */
+void MPU6050_Init(void)
+{
+    I2C1_Init();
+    DMA1_Stream0_Init();
 
-	// Write data to Data Register
-	I2C1->DR = data;
+    /* Exit sleep mode */
+    MPU6050_Write_Register(REG_PWR_MGMT_1,   0x01);
 
-	// Wait for BTF to set
-	while(!(I2C1->SR1 & (1U << 2)));
+    /* Sample rate = gyro rate / (1 + divider)
+     * divider = 0  →  1 kHz with DLPF enabled
+     */
+    MPU6050_Write_Register(REG_SMPLRT_DIV,   0x00);
+
+    /* Gyroscope full-scale: FS_SEL = 0  →  ±250 °/s
+     * LSB sensitivity = 131 LSB per °/s
+     */
+    MPU6050_Write_Register(REG_GYRO_CONFIG,  0x00);
+
+    /* Accelerometer full-scale: AFS_SEL = 0  →  ±2 g
+     * LSB sensitivity = 16384 LSB per g
+     */
+    MPU6050_Write_Register(REG_ACCEL_CONFIG, 0x00);
 }
 
-void I2C1_send_address(uint8_t address) {
-	// Set address to Data Register
-	I2C1->DR = address;
+/* Public: start a non-blocking DMA read of all sensor registers
+ *
+ * Phase 1 – CPU (polling):
+ *   Send a repeated-start register-pointer write to 0x3B so the
+ *   MPU6050 will stream 14 bytes starting at ACCEL_XOUT_H.
+ *
+ * Phase 2 – DMA:
+ *   DMA receives the 14 bytes autonomously. The LAST bit in
+ *   I2C_CR2 makes the hardware send NACK after the final byte.
+ *   The CPU returns immediately and is free to do other work.
+ *   DMA1_Stream0_IRQHandler() generates STOP and parses the data.
+ */
+void MPU6050_Read_All_DMA(void)
+{
+    dma_transfer_complete = 0;
 
-	// Wait for ADDR bit to set
-	while(!(I2C1->SR1 & (1U << 1)));
+    /* WRITE PHASE: set the MPU6050 register pointer */
 
-	// Read SR1 and SR2 to clear ADDR bit
-	(void)(I2C1->SR1 | I2C1->SR2);
+    while (I2C1->SR2 & I2C_SR2_BUSY);    /* Wait for bus free */
+
+    /* START */
+    I2C1->CR1 |= I2C_CR1_START;
+    while (!(I2C1->SR1 & I2C_SR1_SB));
+
+    /* Slave address + WRITE */
+    I2C1->DR = MPU6050_ADDR;             /* 0xD0 */
+    while (!(I2C1->SR1 & I2C_SR1_ADDR));
+    (void)I2C1->SR1;
+    (void)I2C1->SR2;                     /* Clear ADDR */
+
+    /* Register address to start reading from */
+    I2C1->DR = REG_ACCEL_XOUT_H;        /* 0x3B */
+    while (!(I2C1->SR1 & I2C_SR1_BTF)); /* Wait: byte fully clocked out */
+
+    /* Prepare DMA before issuing RESTART */
+
+    /* Reset stream (NDTR auto-decrements, must reload before each read) */
+    DMA1_Stream0->CR  &= ~DMA_SxCR_EN;
+    while (DMA1_Stream0->CR & DMA_SxCR_EN);
+    DMA1->LIFCR        = 0x3DUL;
+    DMA1_Stream0->NDTR = DMA_BUFFER_SIZE;
+    DMA1_Stream0->M0AR = (uint32_t)dma_rx_buffer;
+    DMA1_Stream0->CR  |= DMA_SxCR_EN;   /* Enable stream */
+
+    /* DMAEN: I2C will issue a DMA request after each received byte.
+     * LAST:  after the (N-1)th byte, hardware clears ACK so the
+     *        Nth byte is NACKed – tells slave to stop sending.
+     */
+    I2C1->CR2 |= I2C_CR2_DMAEN | I2C_CR2_LAST;
+
+    /* ACK must be set before clearing ADDR on the read address  */
+    I2C1->CR1 |= I2C_CR1_ACK;
+
+    /* READ PHASE: repeated START + slave address + READ */
+
+    I2C1->CR1 |= I2C_CR1_START;
+    while (!(I2C1->SR1 & I2C_SR1_SB));
+
+    /* Slave address + READ (LSB = 1) */
+    I2C1->DR = MPU6050_ADDR | 0x01;     /* 0xD1 */
+    while (!(I2C1->SR1 & I2C_SR1_ADDR));
+    (void)I2C1->SR1;
+    (void)I2C1->SR2;   /* Clear ADDR – DMA immediately starts receiving */
+
+    /* CPU returns; DMA ISR handles the rest */
 }
 
-void I2C1_read_multi_byte(uint8_t dev_addr, uint8_t reg_addr, uint8_t *data, uint8_t size) {
-	I2C1_start(); // Start I2C1
-	I2C1_send_address(dev_addr << 1); // Send device salve address: 7-bit address + Write bit (0)
-	I2C1_write(reg_addr); // Write address
+/* Public: convert the raw byte buffer into signed 16-bit values
+ * Called automatically from the DMA ISR; can also be called
+ * manually if you manage transfers yourself.
+ */
+void MPU6050_Parse_Data(void)
+{
+    Accel_X_Raw = (int16_t)((dma_rx_buffer[0]  << 8) | dma_rx_buffer[1]);
+    Accel_Y_Raw = (int16_t)((dma_rx_buffer[2]  << 8) | dma_rx_buffer[3]);
+    Accel_Z_Raw = (int16_t)((dma_rx_buffer[4]  << 8) | dma_rx_buffer[5]);
 
-	// Restart for Read
-	I2C1_start();
-	I2C1_send_address((dev_addr << 1) | 1); // Send device salve address: 7-bit address + Read bit (1)
-
-	// Enable Acknowledge
-	I2C1->CR1 |= (1U << 10);
-
-	// Read loop
-	while(size) {
-		if (size == 1) {
-			// Last byte to read: Disable ACK and generate STOP
-			I2C1->CR1 &= ~(1U << 10);
-			I2C1_stop();
-		}
-
-		while(!(I2C1->SR1 & (1U << 6))); // Wait for RxNE bit to set (Data register not empty)
-
-		*data++ = I2C1->DR; // Read data
-		size--;
-	}
+    Gyro_X_Raw  = (int16_t)((dma_rx_buffer[8]  << 8) | dma_rx_buffer[9]);
+    Gyro_Y_Raw  = (int16_t)((dma_rx_buffer[10] << 8) | dma_rx_buffer[11]);
+    Gyro_Z_Raw  = (int16_t)((dma_rx_buffer[12] << 8) | dma_rx_buffer[13]);
 }
 
-void MPU6050_WriteReg(uint8_t dev_addr, uint8_t reg_addr, uint8_t data) {
-	I2C1_start();
-	I2C1_send_address(dev_addr << 1);
-	I2C1_write(reg_addr);
-	I2C1_write(data);
-	I2C1_stop();
-}
+/* DMA1 Stream 0 interrupt handler
+ *
+ * Fires when all 14 bytes have been received.
+ * Generates the I2C STOP, parses the buffer, and sets the flag.
+ */
+void DMA1_Stream0_IRQHandler(void)
+{
+    if (DMA1->LISR & DMA_LISR_TCIF0)
+    {
+        /* Clear all Stream 0 interrupt flags */
+        DMA1->LIFCR = 0x3DUL;
 
-void MPU6050_Init(void) {
-	// Wake up the sensor (write 0 to Power Management 1)
-	MPU6050_WriteReg(MPU_ADDR, WAKE_REG_ADDR, 0);
+        /* Disable DMA stream */
+        DMA1_Stream0->CR &= ~DMA_SxCR_EN;
 
-	// Set Digital Low Pass Filter (DLPF) to ~42Hz
-	MPU6050_WriteReg(MPU_ADDR, DLPF_REG_ADDR, 3);
+        /* Stop I2C from issuing further DMA requests */
+        I2C1->CR2 &= ~(I2C_CR2_DMAEN | I2C_CR2_LAST);
 
-	// Set Gyroscope Full Scale Range to ±500 deg/s
-	MPU6050_WriteReg(MPU_ADDR, GYRO_REG_ADDR, 1);
+        /* Generate STOP condition */
+        I2C1->CR1 |= I2C_CR1_STOP;
 
-	// Set Accelerometer Full Scale Range to ±2g
-	MPU6050_WriteReg(MPU_ADDR, ACCEL_REG_ADDR, 0);
-}
+        /* Clear ACK (default state; set again before next multi-byte read) */
+        I2C1->CR1 &= ~I2C_CR1_ACK;
 
-uint8_t MPU6050_Test_Connection(void) {
-	uint8_t who_am_i = 0;
+        /* Parse raw bytes into signed 16-bit values */
+        MPU6050_Parse_Data();
 
-	// Read 1 byte from the WHO_AM_I register
-	I2C1_read_multi_byte(MPU_ADDR, WHO_AM_I_REG_ADDR, &who_am_i, 1);
-
-	// The MPU6050 should always return 0x68
-	if (who_am_i == 0x68) {
-		return 1; // Success: MCU is communicating with the sensor
-	}
-
-	return 0; // Failure: Sensor not found or I2C bus error
+        /* Signal main loop that fresh data is available */
+        dma_transfer_complete = 1;
+    }
 }
