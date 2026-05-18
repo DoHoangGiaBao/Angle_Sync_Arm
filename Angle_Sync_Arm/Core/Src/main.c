@@ -1,13 +1,8 @@
 #include "main.h"
-
+#include <stdio.h>
 /* Biến lưu trữ góc sau khi tính toán */
 float Roll, Pitch;
-
-//void delay_simple(uint32_t delay) {
-//    while(delay--) {
-//        __NOP();
-//    }
-//}
+char lcd_buffer[16];
 
 int main(void) {
     /* 1. Khởi tạo ngoại vi */
@@ -16,10 +11,15 @@ int main(void) {
 
     // Khởi tạo PWM cho Servo
     Servo_F401_Init();
-
+    LCD_Init();        // Khởi tạo LCD thông qua bộ bus I2C1 đã bật ở trên
     /* 2. Cấu hình mặc định cho Servo về vị trí cân bằng (90 độ) */
     Set_Servo1(90);
     Set_Servo2(90);
+
+    /* In tiêu đề tĩnh một lần duy nhất */
+    LCD_Clear();
+    LCD_SetCursor(0, 0);
+    LCD_String("IMU 2DOF Monitor");
 
     while (1) {
         /* 3. Bắt đầu đọc dữ liệu từ cảm biến qua DMA (Không chặn) */
@@ -49,6 +49,11 @@ int main(void) {
         Set_Servo1(s1_pos);
         Set_Servo2(s2_pos);
 
+        // Định dạng chuỗi hiển thị góc Roll và Pitch ngắn gọn, căn lề 3 ký tự
+        sprintf(lcd_buffer, "R:%3d   P:%3d   ", (int)Roll, (int)Pitch);
+
+        LCD_SetCursor(1, 0);
+        LCD_String(lcd_buffer);
         /* Delay nhỏ để tránh quá tải bus I2C và giúp Servo kịp phản hồi */
         delay_simple(50000);
     }
