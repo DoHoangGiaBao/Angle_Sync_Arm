@@ -2,7 +2,7 @@
 #define __MAIN_H
 
 #include "stm32f4xx.h"
-#include "mpu6050.h"
+#include "MPU6050_DMA.h"
 #include "servo.h"
 #include <math.h>
 #include "lcd_i2c.h"
