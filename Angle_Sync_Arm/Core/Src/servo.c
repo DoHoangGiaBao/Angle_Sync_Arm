@@ -44,8 +44,3 @@ void Set_Servo2(int angle) {
     TIM2->CCR2 = 500 + (angle * 2000 / 180);
 }
 
-void delay_simple(uint32_t count) {
-    while(count--) {
-        __NOP();
-    }
-}

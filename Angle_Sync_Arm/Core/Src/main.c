@@ -12,6 +12,30 @@ extern volatile uint8_t dma_transfer_complete;
 
 char lcd_buffer[32];
 
+// Biến toàn cục lưu trữ số mili-giây đã trôi qua
+// BẮT BUỘC phải có từ khóa volatile vì nó được cập nhật trong ngắt
+volatile uint32_t my_tick = 0;
+
+/* 1. Hàm khởi tạo SysTick */
+void SysTick_Init(void) {
+    // Để tạo ra ngắt mỗi 1ms, ta cần bộ đếm đếm 16,000 nhịp.
+    // Hàm SysTick_Config() có sẵn trong thư viện lõi CMSIS của ARM.
+    SysTick_Config(16000000 / 1000);
+    // Cài đặt mức ưu tiên cho SysTick thường để mức thấp hơn ngắt IR)
+    NVIC_SetPriority(SysTick_IRQn, 3);
+}
+
+/* 2. Trình phục vụ ngắt SysTick (Hệ thống tự động gọi hàm này mỗi 1ms) */
+void SysTick_Handler(void) {
+    my_tick++; // Tăng biến đếm lên 1 sau mỗi mili-giây
+}
+
+/* 3. Hàm tạo trễ chính xác theo mili-giây */
+void delay_ms(uint32_t ms) {
+    uint32_t start_tick = my_tick;
+    // Chờ cho đến khi hiệu số thời gian đạt đủ mức yêu cầu
+    while ((my_tick - start_tick) < ms);
+}
 
 void IR_Interrupt_Init(void) {
 	RCC->AHB1ENR |= (1 << 0) | (1 << 1); // Bật Clock cho Port A và Port B
@@ -62,6 +86,7 @@ void EXTI15_10_IRQHandler(void) {
 }
 
 int main(void) {
+	SysTick_Init();
     I2C1_Init();
     DMA1_Init();
     MPU6050_Init();
@@ -105,6 +130,6 @@ int main(void) {
             LCD_String(lcd_buffer);
         }
 
-        delay_simple(50000);
+        delay_ms(15);
     }
 }
