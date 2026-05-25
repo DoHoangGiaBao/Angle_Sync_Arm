@@ -17,19 +17,19 @@ void IR_Interrupt_Init(void) {
 	RCC->AHB1ENR |= (1 << 0) | (1 << 1); // Bật Clock cho Port A và Port B
     RCC->APB2ENR |= (1 << 14); // Bật Clock cho SYSCFG
 
-    GPIOA->MODER &= ~(3U << 16);
-    GPIOA->PUPDR &= ~(3U << 16);
-    GPIOA->PUPDR |=  (1U << 16);
+    GPIOA->MODER &= ~(3 << 16);
+    GPIOA->PUPDR &= ~(3 << 16);
+    GPIOA->PUPDR |=  (1 << 16);
 
     // 3. Cấu hình chân PB10 (IR 2 - NÚT MỞ KHÓA)
-    GPIOB->MODER &= ~(3U << 20);         // Input (Chân 10 nằm ở bit 21:20)
-    GPIOB->PUPDR &= ~(3U << 20);
-    GPIOB->PUPDR |=  (1U << 20);
+    GPIOB->MODER &= ~(3 << 20);         // Input (Chân 10 nằm ở bit 21:20)
+    GPIOB->PUPDR &= ~(3 << 20);
+    GPIOB->PUPDR |=  (1 << 20);
 
-    SYSCFG->EXTICR[2] &= ~(0xFU << 0);
+    SYSCFG->EXTICR[2] &= ~(0xF << 0);
 
-    SYSCFG->EXTICR[2] &= ~(0xFU << 8);   // Xóa cấu hình cũ
-    SYSCFG->EXTICR[2] |=  (1U << 8);
+    SYSCFG->EXTICR[2] &= ~(0xF << 8);   // Xóa cấu hình cũ
+    SYSCFG->EXTICR[2] |=  (1 << 8);
 
     // 5. Thiết lập ngắt cạnh xuống (Falling Edge) cho cả Line 8 và Line 10
     EXTI->FTSR |= (1 << 8) | (1 << 10);
@@ -39,7 +39,7 @@ void IR_Interrupt_Init(void) {
     NVIC_SetPriority(EXTI9_5_IRQn, 1);
     NVIC_EnableIRQ(EXTI9_5_IRQn);
 
-    NVIC_SetPriority(EXTI15_10_IRQn, 1); // Bật thêm bộ ngắt cho Line 10-15
+    NVIC_SetPriority(EXTI15_10_IRQn, 1);
     NVIC_EnableIRQ(EXTI15_10_IRQn);
 }
 

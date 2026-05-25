@@ -60,7 +60,7 @@ void MPU6050_Write_Register(uint8_t reg, uint8_t data) {
     I2C1->CR1 |= (1U << 8);
     while (!(I2C1->SR1 & (1U << 0)));
 
-    I2C1->DR = (0x68 << 1); // Thay MPU6050_ADDR bằng địa chỉ chuẩn
+    I2C1->DR = (0x68 << 1); // địa chỉ
     while (!(I2C1->SR1 & (1U << 1)));
     (void)I2C1->SR2;
 
